@@ -162,7 +162,9 @@ struct NewTaskView: View {
         startedIDs.insert(link.id)
         Task {
             await manager.enqueue(url: url, provider: link.provider)
-            NotificationCenter.default.post(name: .yunxNewTask, object: nil)
+            // 任务已进队列，切到下载页让用户看到进度
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            NotificationCenter.default.post(name: .yunxShowDownloads, object: nil)
         }
     }
 

@@ -44,6 +44,7 @@ struct YunXMacApp: App {
 
 extension Notification.Name {
     static let yunxNewTask = Notification.Name("cn.yunxmac.newTask")
+    static let yunxShowDownloads = Notification.Name("cn.yunxmac.showDownloads")
     static let yunxPauseAll = Notification.Name("cn.yunxmac.pauseAll")
 }
 

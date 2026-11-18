@@ -80,6 +80,9 @@ struct MainView: View {
         .onReceive(NotificationCenter.default.publisher(for: .yunxNewTask)) { _ in
             selection = .newTask
         }
+        .onReceive(NotificationCenter.default.publisher(for: .yunxShowDownloads)) { _ in
+            selection = .downloads
+        }
         .onReceive(NotificationCenter.default.publisher(for: .yunxPauseAll)) { _ in
             for job in manager.jobs where job.status == .running {
                 manager.pause(job)
