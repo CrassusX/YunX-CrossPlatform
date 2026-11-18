@@ -36,17 +36,43 @@
 | **多任务队列** | 可配置同时下载任务数，排队自动放行 |
 | **任务持久化** | 任务列表与分片进度落盘到 `~/Library/Application Support/YunX-Mac-Desktop/tasks.json`，重启恢复 |
 | **原生集成** | 系统通知、Finder 定位、拖拽链接进窗口、剪贴板识别、深浅色自适应 |
+| **百度网盘直下** | 内置登录窗登一次，之后分享链接直接进下载队列。实测 259 MB 分享视频解析出真实直链，`HTTP 206` + `Content-Type: video/mp4`，支持分片并发。详见下方「百度网盘解析链路」 |
+
+### 百度网盘解析链路
+
+这条链路是逐层实测出来的，几个关键点记在这里，免得以后重复踩：
+
+```
+首页取 BAIDUID → /share/verify 验提取码换 BDCLND → /share/list 列文件
+  → 搜索网盘是否已有同名同大小文件（有则复用，不重复写盘）
+  → /share/transfer 转存到 /来自分享
+  → /rest/2.0/xpan/file?method=filemetas&dlink=1 取直链
+  → 带 Referer + Cookie + UA 分片下载
+```
+
+**为什么必须转存**：百度从 2020 年后收掉了「未转存文件直接给直链」的能力。`/api/sharedownload` 对着分享 fs_id 一律回 `errno 2`，只有**自己网盘里**的文件才给可用地址。这是平台限制，不是实现取舍。
+
+**几个反直觉的坑**：
+
+| 坑 | 表现 | 正解 |
+|---|---|---|
+| `URLComponents.query` 二次编码 | 拼出的 URL 里 `%5B` 变成 `%255B`，接口认不出 | 用 `percentEncodedQuery`，或直接用字符串初始化 URL |
+| 分享短链的两种写法混用 | `/share/list` 要用去掉开头 `1` 的 ID，`/share/tplconfig` 要用带 `1` 的原样 ID，混了回 `errno 2` | 区分 `baiduSurl` 与 `baiduRawToken` |
+| sign 接口换代 | `/api/gettemplatevariable` 已不再下发 sign，只回 timestamp/bdstoken | sign 改从 `/share/tplconfig` 取 |
+| `gettemplatevariable` 对 fields 敏感 | 只请求 `["bdstoken"]` 回 `errno 2` | 必须连同 `sign`/`timestamp` 一起请求 |
+| 直链接口选错 | `/api/filemetas?dlink=1` 对文件回 `errno 12 / info.errno 31021` | 用 `/rest/2.0/xpan/file?method=filemetas`，且**不要**带空的 `access_token=` |
+| 转存报「文件已存在」 | `errno 2, show_msg: 文件已存在`，且不返回 fs_id | 先 `/api/search` 按文件名 + 大小匹配复用已有文件 |
+| 登录窗抓到脏 cookie | 凭证里混进 `undefined=`，后续请求全挂 | 写入时过滤空名与 `undefined` |
 
 ### 尚未实现
 
-网盘与视频平台的**私有解析接口**（真正把分享链接换成可下载直链那一步）本版本没有做。原因很直接：
+- **夸克 / UC**：解析代码已按同一套 `sharepage/token → detail → download` 接口写好，登录与凭证管理也已接好，但**没有真机验证过**，所以不宣称可用。需要一个真实分享链接跑通后才敢标「已支持」。
+- **视频平台**（B 站 / 抖音 / 小红书 / 微博 / 快手 / AcFun / Pixiv）：作品页需要登录态 + 签名算法，本版本只识别来源。
+- **其余六家网盘**：同样只识别来源与提取码，一键带码在浏览器打开。
+- **P2P**（磁力 / BT / eD2k）：仅识别，请交给专用工具（原项目也是把 P2P 交给 Gopeed 引擎）。
 
-- 这些接口需要登录态 Cookie（账号凭证），且接口本身未公开、随平台改版频繁变动；
-- 无账号、无接口文档的情况下硬写，交付的只会是「看起来有功能但一用就报错」的假实现。
+「解析」本身是留成可插拔扩展点的（见下方 `Resolver` 设计），补一家平台只需要新增一个 `PanResolver` 实现。
 
-所以本版本的处理是：**完整识别来源、提取提取码、一键带码在浏览器打开**，把「解析」留成可插拔的扩展点（见下方 `Resolver` 设计）。要补齐这部分，需要你提供目标平台的账号，逐个平台做真机联调。
-
-磁力 / BT / eD2k 同理，仅做识别，请交给专用工具（原项目也是把 P2P 交给 Gopeed 引擎）。
 
 ## 安装
 

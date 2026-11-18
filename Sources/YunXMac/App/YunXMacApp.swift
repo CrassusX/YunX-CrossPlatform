@@ -5,11 +5,13 @@ struct YunXMacApp: App {
 
     @StateObject private var settings: AppSettings
     @StateObject private var manager: DownloadManager
+    @StateObject private var accounts: PanAccountStore
 
     init() {
         let settings = AppSettings.shared
         _settings = StateObject(wrappedValue: settings)
         _manager = StateObject(wrappedValue: DownloadManager(settings: settings))
+        _accounts = StateObject(wrappedValue: PanAccountStore.shared)
         Notifier.requestAuthorization()
     }
 
@@ -18,6 +20,7 @@ struct YunXMacApp: App {
             MainView()
                 .environmentObject(settings)
                 .environmentObject(manager)
+                .environmentObject(accounts)
                 .frame(minWidth: 940, minHeight: 620)
                 .onAppear {
                     NSApp.activate(ignoringOtherApps: true)

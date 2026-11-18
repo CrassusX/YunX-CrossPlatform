@@ -79,7 +79,11 @@ final class DownloadManager: ObservableObject {
     // MARK: 对外操作
 
     /// 新建任务：先探测响应头，再决定分片方案
-    func enqueue(url: URL, provider: Provider, preferredName: String? = nil) async {
+    func enqueue(url: URL,
+                 provider: Provider,
+                 preferredName: String? = nil,
+                 extraHeaders: [String: String] = [:],
+                 knownSize: Int64 = -1) async {
         let resolved = resolveMirrorIfNeeded(url: url, provider: provider)
         let record = DownloadRecord(
             sourceURL: url.absoluteString,
@@ -88,17 +92,23 @@ final class DownloadManager: ObservableObject {
             directoryPath: settings.downloadDirectory,
             provider: provider
         )
+        var merged = extraHeaders
+        if let existing = record.requestHeaders { merged.merge(existing) { new, _ in new } }
+
         let job = DownloadJob(record: record)
+        job.record.requestHeaders = merged.isEmpty ? nil : merged
         job.isPreparing = true
         job.status = .queued
         jobs.insert(job, at: 0)
 
         do {
-            let probe = try await Prober.probe(url: resolved)
+            let probe = try await Prober.probe(url: resolved, headers: merged)
             var updated = job.record
-            updated.fileName = uniqueFileName(probe.suggestedFileName,
+            let suggested = preferredName ?? probe.suggestedFileName
+            updated.fileName = uniqueFileName(suggested,
                                               in: URL(fileURLWithPath: updated.directoryPath))
-            updated.totalSize = probe.totalSize
+            // 网盘接口通常已经给出准确大小，优先用它，避免探测结果偏差
+            updated.totalSize = knownSize > 0 ? knownSize : probe.totalSize
             updated.supportsRange = probe.supportsRange
             if probe.supportsRange {
                 updated.segments = SegmentedDownloader.makeSegments(
@@ -149,9 +159,15 @@ final class DownloadManager: ObservableObject {
             return
         }
 
+        var headers = defaultHeaders()
+        if let extra = job.record.requestHeaders {
+            // 网盘直链的 Referer / Cookie 必须盖过默认头，否则会 403
+            headers.merge(extra) { _, new in new }
+        }
+
         let spec = SegmentedDownloader.Spec(
             url: target,
-            headers: defaultHeaders(),
+            headers: headers,
             tempURL: job.record.temporaryURL,
             totalSize: job.record.totalSize,
             supportsRange: job.record.supportsRange,

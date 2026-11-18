@@ -91,3 +91,58 @@ sleep(target - now)
 ```
 https://ghfast.top/https://github.com/owner/repo/releases/download/...
 ```
+
+---
+
+## 网盘解析层
+
+### 分层
+
+```
+LinkParser          识别来源 + 提取提取码（纯本地，不发网络请求）
+      ↓
+PanAccountStore     凭证内存态，界面观察它
+      ↓
+PanCredentialStore  Keychain 持久化（service: cn.yunxmac.pan-credential）
+      ↓
+PanLoginSheet       内置 WKWebView 登录窗，轮询 cookie store 判定登录成功
+      ↓
+PanResolver 协议    每家一个实现：先 preview() 拿文件列表，再 resolve() 换直链
+      ↓
+ResolvedFile        { 直链, 文件名, 大小, 必需的请求头 }
+      ↓
+DownloadManager.enqueue(extraHeaders:knownSize:)   请求头随任务持久化
+```
+
+### 为什么不复用全局 URLSession
+
+`PanHTTP` 是解析专用的轻量客户端：`httpShouldSetCookies = false`、手动维护 cookie 字典。原因有两个：
+
+1. 解析过程会在同一个会话里连续做「验提取码 → 列目录 → 转存」，中间产生的 `BDCLND` 等 cookie 必须精确跟着走，交给系统的 cookie storage 反而不好控制时序；
+2. 不污染应用其余请求的 cookie 状态。
+
+### 凭证存储
+
+只存解析直链必需的会话 cookie，**密码从没经过我们**——用户是在应用内嵌的 `WKWebView` 里直接登给平台自己的。
+
+判定「真的登录了」不能看有没有 cookie（游客态也有 `BAIDUID`），要看平台特有的登录标记：
+
+| 平台 | 判定 cookie |
+|---|---|
+| 百度 | `BDUSS` / `BDUSS_BFESS` / `STOKEN` |
+| 夸克 | `__puus` / `__pus` / `__kp` |
+| UC | `__puus` / `__pus` |
+
+写入时过滤空名与 `undefined`：`Set-Cookie` 的解析边界上偶尔会混进 `undefined=`，这种脏 key 会让后续所有请求的 Cookie 头失效。
+
+### 转存策略（百度）
+
+百度现在只对「自己网盘里」的文件发可用 dlink，所以下载前必须落一份到用户网盘。设计上做了三点收敛：
+
+1. **幂等**：转存前先 `/api/search` 按「文件名 + 大小」查一遍，命中就复用，不重复写盘；
+2. **可回收**：统一落在 `/来自分享/<文件名>/` 下，便于一键清理（`BaiduPanResolver.cleanTransferred`）；
+3. **透明**：note 里明确告诉用户文件在哪、是复用的还是新转存的。
+
+### 请求头必须随任务持久化
+
+网盘直链会校验 `Referer` / `Cookie` / `User-Agent`，缺一个就 403。这些头写进了 `DownloadRecord.requestHeaders`，因为**断点续传跨应用重启**——如果只存在内存里，重启后恢复下载会全部失败。

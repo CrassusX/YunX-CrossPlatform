@@ -4,10 +4,12 @@ import AppKit
 struct SettingsView: View {
 
     @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var accounts: PanAccountStore
 
     @State private var mirrorResults: [MirrorResult] = []
     @State private var isTesting = false
     @State private var customPrefix: String = ""
+    @State private var loginProvider: Provider?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -30,6 +32,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     storageSection
                     concurrencySection
+                    panAccountsSection
                     behaviorSection
                     mirrorSection
                 }
@@ -40,6 +43,12 @@ struct SettingsView: View {
         .onAppear {
             customPrefix = settings.mirrorPrefix
             if mirrorResults.isEmpty { runMirrorTest() }
+        }
+        .sheet(item: $loginProvider) { provider in
+            PanLoginSheet(provider: provider) { _ in
+                loginProvider = nil
+            }
+            .environmentObject(accounts)
         }
     }
 
@@ -140,6 +149,70 @@ struct SettingsView: View {
             }
         }
     }
+
+    // MARK: 网盘账号
+
+    private var panAccountsSection: some View {
+        SettingsCard(title: "网盘账号", icon: "person.badge.key") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("登录后即可解析分享链接直接下载。凭证只存在本机钥匙串，不上传任何服务器。百度网盘下载前会把文件转存到你网盘，若已存在同名同大小文件则直接复用。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ForEach(Self.supportedPanProviders, id: \.self) { provider in
+                    HStack(spacing: 10) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(Theme.warning.opacity(0.14))
+                            Image(systemName: provider.symbolName)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Theme.warning)
+                        }
+                        .frame(width: 26, height: 26)
+
+                        Text(provider.displayName)
+                            .font(.system(size: 12, weight: .medium))
+                            .frame(width: 76, alignment: .leading)
+
+                        if accounts.isSignedIn(provider) {
+                            Label("已登录", systemImage: "checkmark.circle.fill")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Theme.success)
+                        } else {
+                            Text("未登录")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        if accounts.isSignedIn(provider) {
+                            Button("退出登录") {
+                                accounts.signOut(provider)
+                            }
+                            .controlSize(.small)
+                            .buttonStyle(.bordered)
+
+                            Button("重新登录") {
+                                loginProvider = provider
+                            }
+                            .controlSize(.small)
+                            .buttonStyle(.bordered)
+                        } else {
+                            Button("登录") {
+                                loginProvider = provider
+                            }
+                            .controlSize(.small)
+                            .buttonStyle(.borderedProminent)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    static let supportedPanProviders: [Provider] = [.baidu, .quark, .uc]
 
     // MARK: 行为
 

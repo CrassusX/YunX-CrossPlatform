@@ -191,6 +191,9 @@ struct DownloadRecord: Codable, Identifiable {
     var provider: Provider = .direct
     var mirrorPrefix: String?
     var errorMessage: String?
+    /// 网盘直链必需的 Referer / Cookie 等，必须随任务持久化，
+    /// 否则重启后断点续传会因为缺少鉴权头而 403
+    var requestHeaders: [String: String]?
 
     var destinationURL: URL {
         URL(fileURLWithPath: directoryPath).appendingPathComponent(fileName)

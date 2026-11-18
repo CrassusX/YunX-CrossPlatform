@@ -5,11 +5,26 @@ struct NewTaskView: View {
 
     @EnvironmentObject private var manager: DownloadManager
     @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var accounts: PanAccountStore
 
     @State private var input: String = ""
     @State private var parsed: [ParsedLink] = []
     @State private var startedIDs: Set<UUID> = []
+    @State private var resolvingIDs: Set<UUID> = []
     @State private var isDropTargeted = false
+
+    /// 要弹登录窗的平台
+    @State private var loginProvider: Provider?
+    /// 登录成功后要继续解析的那条链接
+    @State private var pendingLink: ParsedLink?
+    /// 顶部提示条
+    @State private var banner: Banner?
+
+    struct Banner: Identifiable {
+        let id = UUID()
+        var message: String
+        var isError: Bool
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -19,6 +34,9 @@ struct NewTaskView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     editor
+                    if let banner {
+                        bannerView(banner)
+                    }
                     if !parsed.isEmpty { results }
                     hint
                 }
@@ -31,6 +49,18 @@ struct NewTaskView: View {
             startedIDs.removeAll()
         }
         .onAppear(perform: fillFromClipboardIfEmpty)
+        .sheet(item: $loginProvider) { provider in
+            PanLoginSheet(provider: provider) { credential in
+                loginProvider = nil
+                guard credential != nil, let link = pendingLink else {
+                    pendingLink = nil
+                    return
+                }
+                pendingLink = nil
+                resolveAndEnqueue(link)
+            }
+            .environmentObject(accounts)
+        }
     }
 
     // MARK: 头部
@@ -121,6 +151,37 @@ struct NewTaskView: View {
         }
     }
 
+    // MARK: 提示条
+
+    private func bannerView(_ banner: Banner) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: banner.isError
+                  ? "exclamationmark.triangle.fill"
+                  : "info.circle.fill")
+                .foregroundStyle(banner.isError ? Theme.danger : Theme.accent)
+                .font(.system(size: 12))
+            Text(banner.message)
+                .font(.system(size: 11))
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button {
+                self.banner = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill((banner.isError ? Theme.danger : Theme.accent).opacity(0.10))
+        )
+    }
+
     // MARK: 解析结果
 
     private var results: some View {
@@ -133,8 +194,14 @@ struct NewTaskView: View {
                 LinkResultCard(
                     link: link,
                     isStarted: startedIDs.contains(link.id),
+                    isResolving: resolvingIDs.contains(link.id),
+                    isSignedIn: accounts.isSignedIn(link.provider),
                     onDownload: { startDownload(link) },
-                    onOpenBrowser: { openInBrowser(link) }
+                    onOpenBrowser: { openInBrowser(link) },
+                    onSignIn: {
+                        pendingLink = link
+                        loginProvider = link.provider
+                    }
                 )
             }
         }
@@ -142,13 +209,20 @@ struct NewTaskView: View {
 
     private var hint: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("本版本可直接下载 HTTP / HTTPS 直链与 GitHub 文件链接", systemImage: "checkmark.seal")
+            Label("HTTP / HTTPS 直链与 GitHub 文件链接可直接下载，支持分片并发与断点续传",
+                  systemImage: "checkmark.seal")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            Label("网盘分享页需要账号授权，先识别来源与提取码，可一键复制到浏览器", systemImage: "info.circle")
+            Label("百度网盘登录一次后即可直接下载分享文件（会先转存到你网盘，可复用已有文件）",
+                  systemImage: "person.badge.key")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            Label("磁力 / BT / eD2k 仅做识别，请交给专用下载工具", systemImage: "arrow.triangle.branch")
+            Label("夸克 / UC 已接入同一套解析逻辑，尚未逐一真机验证；其它网盘与视频平台暂只识别来源",
+                  systemImage: "info.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Label("磁力 / BT / eD2k 仅做识别，请交给专用下载工具",
+                  systemImage: "arrow.triangle.branch")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
@@ -158,11 +232,90 @@ struct NewTaskView: View {
     // MARK: 行为
 
     private func startDownload(_ link: ParsedLink) {
-        guard let url = link.url else { return }
-        startedIDs.insert(link.id)
+        banner = nil
+
+        // 直链：不需要任何凭证，直接探测入队
+        if link.provider.kind == .direct {
+            guard let url = link.url else { return }
+            startedIDs.insert(link.id)
+            Task {
+                await manager.enqueue(url: url, provider: link.provider)
+                showDownloads()
+            }
+            return
+        }
+
+        // 网盘：已接入解析的三家走「登录 → 解析 → 入队」
+        if PanResolverFactory.isSupported(link.provider) {
+            if accounts.isSignedIn(link.provider) {
+                resolveAndEnqueue(link)
+            } else {
+                pendingLink = link
+                loginProvider = link.provider
+            }
+            return
+        }
+
+        // 视频平台 / 未接入的网盘：说清楚为什么不能下，而不是给个假按钮
+        switch link.provider.kind {
+        case .media:
+            banner = Banner(
+                message: "\(link.provider.displayName)作品页需要平台登录态与视频地址解析，本版本尚未接入。可以先用浏览器打开。",
+                isError: false
+            )
+        case .p2p:
+            banner = Banner(message: "磁力 / BT / eD2k 需要 P2P 引擎，本版本不提供下载。", isError: false)
+        case .share:
+            banner = Banner(
+                message: "\(link.provider.displayName)暂未接入解析，目前支持百度、夸克、UC 三家。",
+                isError: false
+            )
+        default:
+            banner = Banner(message: "这个来源无法直接下载。", isError: false)
+        }
+    }
+
+    private func resolveAndEnqueue(_ link: ParsedLink) {
+        guard let resolver = PanResolverFactory.resolver(for: link.provider),
+              let credential = accounts.credential(for: link.provider) else {
+            pendingLink = link
+            loginProvider = link.provider
+            return
+        }
+
+        resolvingIDs.insert(link.id)
         Task {
-            await manager.enqueue(url: url, provider: link.provider)
-            // 任务已进队列，切到下载页让用户看到进度
+            do {
+                let file = try await resolver.resolve(link: link, credential: credential)
+                await manager.enqueue(url: file.url,
+                                      provider: file.provider,
+                                      preferredName: file.fileName,
+                                      extraHeaders: file.headers,
+                                      knownSize: file.size)
+                startedIDs.insert(link.id)
+                if let note = file.note {
+                    banner = Banner(message: note, isError: false)
+                }
+                showDownloads()
+            } catch {
+                let message = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+
+                // 凭证失效就清掉，下次点击会重新弹登录
+                if let resolveError = error as? PanResolveError,
+                   case .credentialExpired(let provider) = resolveError {
+                    accounts.invalidate(provider)
+                    banner = Banner(message: message + "，点下载可重新登录。", isError: true)
+                } else {
+                    banner = Banner(message: message, isError: true)
+                }
+            }
+            resolvingIDs.remove(link.id)
+        }
+    }
+
+    private func showDownloads() {
+        Task { @MainActor in
             try? await Task.sleep(nanoseconds: 300_000_000)
             NotificationCenter.default.post(name: .yunxShowDownloads, object: nil)
         }
@@ -218,8 +371,20 @@ struct LinkResultCard: View {
 
     let link: ParsedLink
     let isStarted: Bool
+    let isResolving: Bool
+    let isSignedIn: Bool
+
     var onDownload: () -> Void
     var onOpenBrowser: () -> Void
+    var onSignIn: () -> Void
+
+    private var canResolve: Bool {
+        PanResolverFactory.isSupported(link.provider)
+    }
+
+    private var isDownloadable: Bool {
+        link.provider.kind == .direct || canResolve
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -244,6 +409,14 @@ struct LinkResultCard: View {
                             .background(Capsule().fill(Theme.warning.opacity(0.16)))
                             .foregroundStyle(Theme.warning)
                     }
+                    if canResolve && !isSignedIn {
+                        Text("需登录")
+                            .font(.system(size: 10, weight: .medium))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.secondary.opacity(0.14)))
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer(minLength: 0)
                 }
 
@@ -261,14 +434,27 @@ struct LinkResultCard: View {
 
             Spacer(minLength: 8)
 
-            VStack(spacing: 6) {
-                if link.provider.isDownloadableInThisVersion {
-                    Button(isStarted ? "已加入" : "下载") {
-                        onDownload()
+            VStack(alignment: .trailing, spacing: 6) {
+                if isDownloadable {
+                    Button {
+                        if canResolve && !isSignedIn { onSignIn() } else { onDownload() }
+                    } label: {
+                        if isResolving {
+                            HStack(spacing: 5) {
+                                ProgressView().controlSize(.mini)
+                                Text("解析中")
+                            }
+                        } else if isStarted {
+                            Label("已加入", systemImage: "checkmark")
+                        } else if canResolve && !isSignedIn {
+                            Label("登录并下载", systemImage: "person.badge.key")
+                        } else {
+                            Label("下载", systemImage: "arrow.down.circle.fill")
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .disabled(isStarted)
+                    .disabled(isStarted || isResolving)
                 } else {
                     Button("浏览器打开") {
                         onOpenBrowser()
@@ -276,8 +462,18 @@ struct LinkResultCard: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
+
+                // 可下载的卡片也保留浏览器入口，提取码会一并带上
+                if isDownloadable {
+                    Button("浏览器打开") {
+                        onOpenBrowser()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                }
             }
-            .frame(width: 96)
+            .frame(width: 112)
         }
         .padding(12)
         .background(
@@ -302,18 +498,28 @@ struct LinkResultCard: View {
 
     private var capabilityText: String {
         switch link.provider.kind {
-        case .direct: return "可直接下载 · 支持分片并发与断点续传"
-        case .share: return "需要账号授权，本版本先识别来源与提取码"
-        case .media: return "视频平台作品页，需登录后解析"
-        case .p2p: return "P2P 链接，请使用专用下载工具"
-        case .unknown: return "未识别的来源，可尝试浏览器打开确认"
+        case .direct:
+            return "可直接下载 · 支持分片并发与断点续传"
+        case .share:
+            if canResolve {
+                return isSignedIn
+                    ? "已登录 · 可解析分享直链并下载"
+                    : "登录一次后即可解析分享直链并下载"
+            }
+            return "需要账号授权，本版本先识别来源与提取码"
+        case .media:
+            return "视频平台作品页，暂未接入解析"
+        case .p2p:
+            return "P2P 链接，请使用专用下载工具"
+        case .unknown:
+            return "未识别的来源，可尝试浏览器打开确认"
         }
     }
 
     private var capabilityColor: Color {
         switch link.provider.kind {
         case .direct: return Theme.success
-        case .share, .media: return .secondary
+        case .share where canResolve: return isSignedIn ? Theme.success : .secondary
         default: return .secondary
         }
     }
