@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# 构建产物
+dist/
+*.dmg
+*.xcodeproj
+*.xcworkspace
+
+# 图标中间产物（AppIcon.icns 与 AppIcon-1024.png 需要入库）
+Resources/AppIcon.iconset/
+
+# 编辑器
+*.swp
+.idea/
+.vscode/
