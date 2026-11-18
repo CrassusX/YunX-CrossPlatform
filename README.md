@@ -4,6 +4,8 @@
 
 通用二进制，**Apple 芯片（arm64）与 Intel 芯片（x86_64）同包原生运行**，单个 DMG 1.3 MB。
 
+同一仓库还包含 [Linux 版](linux/README.md)：纯 Python 标准库实现，带命令行与本地网页面板，支持百度分享与直链，16 项自动化测试全部通过。
+
 ![主界面](docs/screenshot-main.png)
 
 ---

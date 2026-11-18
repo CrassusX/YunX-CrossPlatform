@@ -1,0 +1,14 @@
+[Unit]
+Description=YunX Linux 下载服务（本地网页面板）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/yunx run --web
+Restart=on-failure
+RestartSec=10
+WorkingDirectory=%h
+
+[Install]
+WantedBy=default.target

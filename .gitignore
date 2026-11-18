@@ -17,6 +17,10 @@ dist/
 # 图标中间产物（AppIcon.icns 与 AppIcon-1024.png 需要入库）
 Resources/AppIcon.iconset/
 
+# Python（Linux 版）
+__pycache__/
+*.pyc
+
 # 编辑器
 *.swp
 .idea/
