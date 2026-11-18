@@ -39,13 +39,13 @@ struct DownloadListView: View {
             Spacer()
 
             Button {
-                for job in manager.jobs where job.status == .running {
+                for job in manager.jobs where job.status == .running || job.status == .waitingRetry {
                     manager.pause(job)
                 }
             } label: {
                 Label("全部暂停", systemImage: "pause.fill")
             }
-            .disabled(!manager.jobs.contains { $0.status == .running })
+            .disabled(!manager.jobs.contains { $0.status == .running || $0.status == .waitingRetry })
 
             Button {
                 for job in manager.jobs where job.status == .paused || job.status == .failed {
@@ -64,11 +64,19 @@ struct DownloadListView: View {
 
     private var summaryText: String {
         let running = manager.jobs.filter { $0.status == .running }.count
+        let retrying = manager.jobs.filter { $0.status == .waitingRetry }.count
         let totalSpeed = manager.jobs.reduce(0.0) { $0 + $1.speed }
+        var parts: [String] = []
         if running > 0 {
-            return "\(running) 个任务进行中 · 合计 \(Fmt.speed(totalSpeed))"
+            parts.append("\(running) 个进行中 · 合计 \(Fmt.speed(totalSpeed))")
         }
-        return manager.jobs.isEmpty ? "还没有任务" : "共 \(manager.jobs.count) 个任务"
+        if retrying > 0 {
+            parts.append("\(retrying) 个等待自动重试")
+        }
+        if parts.isEmpty {
+            return manager.jobs.isEmpty ? "还没有任务" : "共 \(manager.jobs.count) 个任务"
+        }
+        return parts.joined(separator: "  ·  ")
     }
 
     private var emptyState: some View {
@@ -141,6 +149,10 @@ struct DownloadRow: View {
             if job.status == .running {
                 Button("暂停") { manager.pause(job) }
             }
+            if job.status == .waitingRetry {
+                Button("立即重试") { manager.fireRetry(job) }
+                Button("暂停") { manager.pause(job) }
+            }
             if job.status == .paused || job.status == .failed {
                 Button("继续") { manager.resume(job) }
             }
@@ -170,6 +182,7 @@ struct DownloadRow: View {
         case .completed: return Theme.success
         case .failed: return Theme.danger
         case .paused: return Theme.warning
+        case .waitingRetry: return Theme.warning
         case .cancelled: return .secondary
         default: return Theme.accent
         }
@@ -218,6 +231,15 @@ struct DownloadRow: View {
         case .paused:
             return "已暂停  ·  \(Fmt.bytes(job.received))"
                 + (job.total > 0 ? " / \(Fmt.bytes(job.total))" : "")
+        case .waitingRetry:
+            let head = job.retryCountdown > 0
+                ? "\(job.retryCountdown) 秒后自动重试"
+                : "即将重试"
+            let note = "第 \(job.retryAttempt) 次 · 已下 \(Fmt.bytes(job.received))"
+            if let error = job.errorMessage, !error.isEmpty {
+                return "\(head) · \(note) · \(error)"
+            }
+            return "\(head) · \(note)"
         case .queued:
             return job.total > 0 ? "等待中  ·  \(Fmt.bytes(job.total))" : "等待中"
         case .cancelled:
@@ -228,12 +250,30 @@ struct DownloadRow: View {
     }
 
     private var detailColor: Color {
-        job.status == .failed ? Theme.danger : Color.secondary
+        switch job.status {
+        case .failed: return Theme.danger
+        case .waitingRetry: return Theme.warning
+        default: return Color.secondary
+        }
     }
 
     private var actionButtons: some View {
         HStack(spacing: 6) {
-            if job.status == .running {
+            if job.status == .waitingRetry {
+                Button {
+                    manager.fireRetry(job)
+                } label: {
+                    Image(systemName: "bolt.fill")
+                }
+                .help("立即重试")
+
+                Button {
+                    manager.pause(job)
+                } label: {
+                    Image(systemName: "pause.fill")
+                }
+                .help("暂停，不再自动重试")
+            } else if job.status == .running {
                 Button {
                     manager.pause(job)
                 } label: {

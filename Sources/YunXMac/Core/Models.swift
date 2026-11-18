@@ -133,6 +133,9 @@ enum JobStatus: String, Codable {
     case queued
     case running
     case paused
+    /// 网络中断后正在退避等待自动重试。与 paused 区分开：
+    /// paused 是用户主动停的，waitingRetry 是系统自己在倒计时
+    case waitingRetry
     case completed
     case failed
     case cancelled
@@ -142,6 +145,7 @@ enum JobStatus: String, Codable {
         case .queued: return "排队中"
         case .running: return "下载中"
         case .paused: return "已暂停"
+        case .waitingRetry: return "等待重试"
         case .completed: return "已完成"
         case .failed: return "失败"
         case .cancelled: return "已取消"
@@ -194,6 +198,9 @@ struct DownloadRecord: Codable, Identifiable {
     /// 网盘直链必需的 Referer / Cookie 等，必须随任务持久化，
     /// 否则重启后断点续传会因为缺少鉴权头而 403
     var requestHeaders: [String: String]?
+    /// 任务级连续失败次数。用可选类型是为了兼容旧版 tasks.json
+    /// （合成的 Codable 遇到新增的非可选字段会整个解码失败）
+    var retryCount: Int?
 
     var destinationURL: URL {
         URL(fileURLWithPath: directoryPath).appendingPathComponent(fileName)

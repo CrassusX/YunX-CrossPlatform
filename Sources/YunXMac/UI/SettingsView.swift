@@ -219,6 +219,15 @@ struct SettingsView: View {
     private var behaviorSection: some View {
         SettingsCard(title: "行为", icon: "switch.2") {
             VStack(alignment: .leading, spacing: 12) {
+                Toggle("下载中断后自动重试", isOn: $settings.autoRetryEnabled)
+
+                Text("断网、超时、连接被重置、服务器 5xx 时，任务会留在列表里按 2 秒起、最长 5 分钟的间隔自动续传，每次都从断点接着下，不需要守在旁边点「继续」。网络恢复或唤醒电脑时会立刻重试。403、404、链接过期这类换个时间也不会好的错误不会重试，直接报失败。")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+
                 Toggle("下载完成时发送系统通知", isOn: $settings.notifyOnComplete)
                 Toggle("打开界面时自动读取剪贴板中的链接", isOn: $settings.watchClipboard)
             }

@@ -32,6 +32,10 @@ final class AppSettings: ObservableObject {
     @Published var notifyOnComplete: Bool {
         didSet { persist() }
     }
+    /// 下载中断后自动退避重试，不需要用户守着点继续
+    @Published var autoRetryEnabled: Bool {
+        didSet { persist() }
+    }
     @Published var mirrorEnabled: Bool {
         didSet { persist() }
     }
@@ -63,6 +67,7 @@ final class AppSettings: ObservableObject {
         speedLimitKBps = snapshot?.speedLimitKBps ?? 0
         watchClipboard = snapshot?.watchClipboard ?? false
         notifyOnComplete = snapshot?.notifyOnComplete ?? true
+        autoRetryEnabled = snapshot?.autoRetryEnabled ?? true
         mirrorEnabled = snapshot?.mirrorEnabled ?? true
         mirrorPrefix = snapshot?.mirrorPrefix ?? ""
         mirrorCandidates = snapshot?.mirrorCandidates ?? Self.defaultMirrors
@@ -107,6 +112,9 @@ final class AppSettings: ObservableObject {
         var mirrorPrefix: String
         var mirrorCandidates: [String]
         var lastMirrorWinner: String
+        /// 新增字段一律用可选类型：合成的 Codable 遇到缺失的非可选键会整份解码失败，
+        /// 那会让老用户的全部设置一次性回到默认值
+        var autoRetryEnabled: Bool?
     }
 
     private static func load() -> Snapshot? {
@@ -125,7 +133,8 @@ final class AppSettings: ObservableObject {
             mirrorEnabled: mirrorEnabled,
             mirrorPrefix: mirrorPrefix,
             mirrorCandidates: mirrorCandidates,
-            lastMirrorWinner: lastMirrorWinner
+            lastMirrorWinner: lastMirrorWinner,
+            autoRetryEnabled: autoRetryEnabled
         )
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         UserDefaults.standard.set(data, forKey: Self.storageKey)
