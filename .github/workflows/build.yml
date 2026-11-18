@@ -1,0 +1,72 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build universal app
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+          xcodebuild -version
+
+      - name: Build .app and .dmg
+        run: ./scripts/build-app.sh
+
+      - name: Verify universal binary
+        run: |
+          BIN="dist/YunX-Mac-Desktop.app/Contents/MacOS/YunXMac"
+          ARCHS="$(lipo -archs "$BIN")"
+          echo "架构：$ARCHS"
+          case "$ARCHS" in
+            *arm64*) ;;
+            *) echo "缺少 arm64 切片"; exit 1 ;;
+          esac
+          case "$ARCHS" in
+            *x86_64*) ;;
+            *) echo "缺少 x86_64 切片"; exit 1 ;;
+          esac
+          codesign --verify --deep --strict "dist/YunX-Mac-Desktop.app"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: YunX-Mac-Desktop-dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: YunX-Mac-Desktop-app
+          path: dist/YunX-Mac-Desktop.app
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
+          generate_release_notes: true
+          body: |
+            macOS 通用二进制（Apple 芯片 + Intel 芯片）。
+
+            首次打开如被 Gatekeeper 拦下，执行：
+
+            ```bash
+            xattr -dr com.apple.quarantine /Applications/YunX-Mac-Desktop.app
+            ```
