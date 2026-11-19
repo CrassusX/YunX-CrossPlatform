@@ -5,9 +5,15 @@ Mac 版下载引擎的 Linux 移植：**纯 Python 标准库，零第三方依�
 
 ## 安装
 
+从统一 Release 下载 Linux 包（与 macOS 版在同一个 tag 下）：
+
 ```bash
-tar -xzf YunX-Linux-1.0.0.tar.gz
-cd YunX-Linux-1.0.0
+# https://github.com/CrassusX/YunX-CrossPlatform/releases/latest
+# 下载 YunX-Linux-<版本>.tar.gz 与同名 .sha256，先校验再解压
+sha256sum -c YunX-Linux-1.4.0.tar.gz.sha256
+
+tar -xzf YunX-Linux-1.4.0.tar.gz
+cd YunX-Linux-1.4.0
 ./scripts/install.sh          # 默认装到 ~/.local，不需要 root
 yunx doctor                   # 检查环境
 ```
@@ -67,7 +73,7 @@ systemctl --user enable --now yunx
 
 ## 下载引擎
 
-和 Mac 版 v1.3.0 同一套策略：
+和 Mac 版 v1.4.0 同一套策略：
 
 - 多分片并发、每片独立 `pwrite`，退出/重启后从断点续传
 - 限速令牌桶，等待可被暂停打断

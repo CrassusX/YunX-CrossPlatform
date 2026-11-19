@@ -80,9 +80,16 @@
 
 ## 安装
 
-从 [Releases](https://github.com/CrassusX/YunX-CrossPlatform/releases) 下载 `YunX-Mac-Desktop-<版本>.dmg`，打开后把 app 拖进「应用程序」。
+两个平台的安装包放在**同一个 Release tag** 下，从 [Releases](https://github.com/CrassusX/YunX-CrossPlatform/releases/latest) 下载对应平台的包：
 
-应用使用 **ad-hoc 签名**（没有 Apple 开发者证书），首次打开会被 Gatekeeper 拦下，两种解法：
+| 平台 | 安装包 | 说明 |
+|---|---|---|
+| macOS（Apple 芯片 + Intel 通用） | `YunX-Mac-Desktop-<版本>.dmg` | 打开后把 app 拖进「应用程序」 |
+| Linux（Python 3.8+，x86_64 / arm64 通用） | `YunX-Linux-<版本>.tar.gz` + `.sha256` | 校验后解压，跑 `scripts/install.sh`，详见 [linux/README.md](linux/README.md) |
+
+每个 tag 下同时提供这两个平台的包，版本号一致。发布历史里 `v1.4.0` 起为双平台统一发布；更早的 `linux-v1.0.0`、`v1.0.0`~`v1.3.0` 为单平台历史版本。
+
+**macOS 注意**：应用使用 **ad-hoc 签名**（没有 Apple 开发者证书），首次打开会被 Gatekeeper 拦下，两种解法：
 
 ```bash
 # 方式一：命令行去掉隔离标记（推荐）
@@ -113,7 +120,7 @@ swift build --disable-sandbox && swift run --disable-sandbox
 
 ```
 dist/YunX-Mac-Desktop.app            # 通用二进制 app
-dist/YunX-Mac-Desktop-1.0.0.dmg      # 分发包
+dist/YunX-Mac-Desktop-1.4.0.dmg      # 分发包
 ```
 
 > `--disable-sandbox` 是因为 SPM 编译 manifest 时会调用 `sandbox-exec`，在部分受限环境下会失败；正常开发机上可以省略。
