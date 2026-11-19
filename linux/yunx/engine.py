@@ -166,6 +166,7 @@ class Engine:
         share_code: Optional[str] = None,
         provider: str = "direct",
         note: Optional[str] = None,
+        pan_fs_id: Optional[str] = None,
         supports_range: bool = True,
         connections: Optional[int] = None,
     ) -> Task:
@@ -183,6 +184,7 @@ class Engine:
             share_code=share_code,
             provider=provider,
             note=note,
+            pan_fs_id=pan_fs_id,
             supports_range=supports_range,
             connections=int(connections or self.settings.get("connections") or 8),
             speed_limit_bps=int(self.settings.get("speed_limit_kbps") or 0) * 1024,
@@ -507,20 +509,26 @@ class _TaskRunner(threading.Thread):
         self.engine.save()
 
     def _try_refresh_dlink(self) -> bool:
-        """直链过期（403）时，用原始分享链接重新解析一次。"""
+        """直链过期（403）时重新解析。多文件任务记录了网盘内 fs_id，
+        直接按它重取，不会拿到分享里别的文件的直链。"""
         if not self.task.source_url or self.task.provider != "baidu":
             return False
         try:
             from .baidu import BaiduResolver
             from .cookiestore import load_cookies
             resolver = BaiduResolver(load_cookies())
-            resolved = resolver.resolve(self.task.source_url, self.task.share_code)
-            self.task.url = resolved.url
-            self.task.request_headers = dict(resolved.headers)
-            self.task.total_size = resolved.size or self.task.total_size
+            if self.task.pan_fs_id:
+                self.task.url = resolver.refresh_dlink(self.task.pan_fs_id)
+                self.task.request_headers = resolver.download_headers()
+                self.engine._log(self.task, "直链已过期，已按网盘文件重新解析")
+            else:
+                resolved = resolver.resolve(self.task.source_url, self.task.share_code)
+                self.task.url = resolved.url
+                self.task.request_headers = dict(resolved.headers)
+                self.task.total_size = resolved.size or self.task.total_size
+                self.engine._log(self.task, "直链已过期，已自动重新解析")
             self.engine._prepare_file(self.task)
             self.engine.save()
-            self.engine._log(self.task, "直链已过期，已自动重新解析")
             return True
         except Exception as exc:
             self.engine._log(self.task, f"重新解析直链失败：{exc}")

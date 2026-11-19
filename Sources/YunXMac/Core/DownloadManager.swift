@@ -104,13 +104,34 @@ final class DownloadManager: ObservableObject {
                  provider: Provider,
                  preferredName: String? = nil,
                  extraHeaders: [String: String] = [:],
-                 knownSize: Int64 = -1) async {
+                 knownSize: Int64 = -1,
+                 relativePath: String? = nil) async {
         let resolved = resolveMirrorIfNeeded(url: url, provider: provider)
+        // 多文件分享保持目录结构：相对路径的父目录落到下载目录下并提前建好
+        let directory: String
+        let name: String
+        if let relativePath, !relativePath.isEmpty {
+            let relative = (relativePath as NSString).standardizingPath
+            let base = settings.downloadDirectory
+            let parent = (relative as NSString).deletingLastPathComponent
+            if !parent.isEmpty {
+                let full = URL(fileURLWithPath: base).appendingPathComponent(parent).path
+                try? FileManager.default.createDirectory(atPath: full,
+                                                         withIntermediateDirectories: true)
+                directory = full
+            } else {
+                directory = base
+            }
+            name = (relative as NSString).lastPathComponent
+        } else {
+            directory = settings.downloadDirectory
+            name = preferredName ?? "准备中…"
+        }
         let record = DownloadRecord(
             sourceURL: url.absoluteString,
             finalURL: resolved.absoluteString,
-            fileName: preferredName ?? "准备中…",
-            directoryPath: settings.downloadDirectory,
+            fileName: name,
+            directoryPath: directory,
             provider: provider
         )
         var merged = extraHeaders

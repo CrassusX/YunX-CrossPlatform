@@ -213,7 +213,7 @@ struct NewTaskView: View {
                   systemImage: "checkmark.seal")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            Label("百度网盘登录一次后即可直接下载分享文件（会先转存到你网盘，可复用已有文件）",
+            Label("百度网盘登录一次后即可直接下载分享文件（含子目录整树递归，多文件自动按目录结构建任务）",
                   systemImage: "person.badge.key")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -286,16 +286,25 @@ struct NewTaskView: View {
         resolvingIDs.insert(link.id)
         Task {
             do {
-                let file = try await resolver.resolve(link: link, credential: credential)
-                await manager.enqueue(url: file.url,
-                                      provider: file.provider,
-                                      preferredName: file.fileName,
-                                      extraHeaders: file.headers,
-                                      knownSize: file.size)
-                startedIDs.insert(link.id)
-                if let note = file.note {
-                    banner = Banner(message: note, isError: false)
+                let files = try await resolver.resolveAll(link: link, credential: credential)
+                for file in files {
+                    await manager.enqueue(url: file.url,
+                                          provider: file.provider,
+                                          preferredName: file.fileName,
+                                          extraHeaders: file.headers,
+                                          knownSize: file.size,
+                                          relativePath: file.relativePath)
                 }
+                startedIDs.insert(link.id)
+                let note: String
+                if files.count > 1 {
+                    note = "已加入 \(files.count) 个文件（保持目录结构），任务队列里逐个下载"
+                } else if let detail = files.first?.note {
+                    note = detail
+                } else {
+                    note = "任务已加入队列"
+                }
+                banner = Banner(message: note, isError: false)
                 showDownloads()
             } catch {
                 let message = (error as? LocalizedError)?.errorDescription

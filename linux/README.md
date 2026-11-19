@@ -10,10 +10,10 @@ Mac 版下载引擎的 Linux 移植：**纯 Python 标准库，零第三方依�
 ```bash
 # https://github.com/CrassusX/YunX-CrossPlatform/releases/latest
 # 下载 YunX-Linux-<版本>.tar.gz 与同名 .sha256，先校验再解压
-sha256sum -c YunX-Linux-1.4.0.tar.gz.sha256
+sha256sum -c YunX-Linux-1.5.0.tar.gz.sha256
 
-tar -xzf YunX-Linux-1.4.0.tar.gz
-cd YunX-Linux-1.4.0
+tar -xzf YunX-Linux-1.5.0.tar.gz
+cd YunX-Linux-1.5.0
 ./scripts/install.sh          # 默认装到 ~/.local，不需要 root
 yunx doctor                   # 检查环境
 ```
@@ -73,9 +73,11 @@ systemctl --user enable --now yunx
 
 ## 下载引擎
 
-和 Mac 版 v1.4.0 同一套策略：
+和 Mac 版 v1.5.0 同一套策略：
 
 - 多分片并发、每片独立 `pwrite`，退出/重启后从断点续传
+- **多文件分享递归下载**：自动展开整棵目录树，转存整树后每个文件一个任务，
+  本地按 `下载目录/<分享名>/<子目录>/` 保持目录结构；直链过期按网盘文件重取，不会拿错文件
 - 限速令牌桶，等待可被暂停打断
 - **把限流的「206 + 0 字节」单独识别**：不消耗 30 次重连额度，退避 30 s 起、最长 180 s
 - 连续空响应直接把并发压到 1，新建连接间隔 0.4 s，从源头减少踩限流
@@ -89,9 +91,11 @@ systemctl --user enable --now yunx
 python3 -m unittest discover -s tests -v
 ```
 
-16 项测试全部通过，覆盖：正常分片、每 16 KB 强断重连、空响应限流、5xx 重试、
+19 项测试全部通过，覆盖：正常分片、每 16 KB 强断重连、空响应限流、5xx 重试、
 403 不重试、Range 被忽略降级、断点续传、限速精度、任务级重试、暂停与重启恢复、
-删除、链接解析、Cookie 往返、百度五步接口参数（含二次编码陷阱）、Web API 与 CLI。
+删除、链接解析、Cookie 往返、百度五步接口参数（含二次编码陷阱）、
+**百度多文件递归（目录树展开 / 整树转存 / 相对路径对齐 / 批量 dlink / 子目录落盘 / pan_fs_id 刷新）**、
+Web API 与 CLI。
 
 ## 已知限制
 
@@ -99,4 +103,4 @@ python3 -m unittest discover -s tests -v
 - 百度免费账号限制的是**账号/IP 总速**（约 100 KB/s），加并发不会提速
 - 自动登录依赖本机浏览器驱动；没有图形界面时无法扫码
 - 下载网盘文件时建议关闭代理：代理一断会让所有分片同时断，重连风暴又容易触发限流
-- 一次只下载分享中的第 1 个文件（多文件分享会在任务备注里提示）
+- 多文件分享递归上限 200 个文件 / 60 个目录，超大分享会截断并在任务备注里提示

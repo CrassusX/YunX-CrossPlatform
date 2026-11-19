@@ -11,6 +11,20 @@ struct ResolvedFile {
     var provider: Provider
     /// 结果里的补充说明，比如"共 3 个文件，本次下载第 1 个"
     var note: String?
+    /// 相对下载根目录的子路径（如 "子目录/文件.mp4"），多文件分享保持目录结构用；
+    /// nil 表示直接放下载根目录
+    var relativePath: String?
+
+    init(url: URL, fileName: String, size: Int64, headers: [String: String],
+         provider: Provider, note: String? = nil, relativePath: String? = nil) {
+        self.url = url
+        self.fileName = fileName
+        self.size = size
+        self.headers = headers
+        self.provider = provider
+        self.note = note
+        self.relativePath = relativePath
+    }
 }
 
 enum PanResolveError: LocalizedError {
@@ -49,6 +63,14 @@ protocol PanResolver {
     func resolve(link: ParsedLink, credential: PanCredential) async throws -> ResolvedFile
 }
 
+extension PanResolver {
+    /// 解析分享里的**全部**文件（保持目录结构）。默认实现退化为单文件，
+    /// 这样夸克 / UC 等还没做多文件的解析器不用改一行。
+    func resolveAll(link: ParsedLink, credential: PanCredential) async throws -> [ResolvedFile] {
+        [try await resolve(link: link, credential: credential)]
+    }
+}
+
 /// 分享里的一个条目
 struct PanShareEntry {
     var name: String
@@ -57,6 +79,10 @@ struct PanShareEntry {
     var id: String
     /// 夸克/UC 需要每组文件的 token
     var extraToken: String?
+    /// 分享内的绝对路径（百度递归列目录用），如 "/分享名/子目录"
+    var sharePath: String?
+    /// 相对分享根目录的路径，如 "子目录/文件.mp4"；根目录条目就是 name
+    var relativePath: String?
 }
 
 // MARK: - 网络小工具

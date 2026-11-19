@@ -20,10 +20,12 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
+from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from yunx import __version__  # noqa: E402
 from yunx.baidu import BaiduResolver, PanHTTP  # noqa: E402
 from yunx.cookiestore import load_cookies, save_cookies  # noqa: E402
 from yunx.engine import Engine, Timing  # noqa: E402
@@ -222,9 +224,10 @@ class EngineTestCase(unittest.TestCase):
     def test_05_fatal_403_no_retry(self):
         self.server = RecordingServer(fatal_status=403)
         engine = self.make_engine()
-        task = engine.add_task(self.server.url, "fatal.bin", len(DATA))
+        # 单连接：排除并发分片竞态，403 必然只发 1 次请求（不重试不打转）
+        task = engine.add_task(self.server.url, "fatal.bin", len(DATA), connections=1)
         self.assertEqual(self.wait_done(task), "failed")
-        self.assertEqual(self.server.count(), 1)   # 不原地打转
+        self.assertEqual(self.server.count(), 1)
         print("\n  403：直接失败，只请求 1 次")
 
     def test_06_no_range_fallback(self):
@@ -390,6 +393,115 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(result.source_url, "https://pan.baidu.com/s/1AbCdEf")
         print("\n  百度解析链路：verify→list→token→transfer→filemetas 参数全部正确，无二次编码")
 
+    def test_14b_baidu_multi_file_tree(self):
+        """多文件分享：递归展开目录树、整树转存、按相对路径对齐、批量 dlink。"""
+        seen = []
+
+        def fake_json(http_self, url, method="GET", headers=None, body=None):
+            seen.append((url, method, body))
+            if "/share/verify" in url:
+                return {"errno": 0}
+            if "/share/list" in url:
+                if "root=1" in url:
+                    return {"errno": 0, "share_id": 1, "uk": 2, "list": [
+                        {"server_filename": "资料", "isdir": 1, "fs_id": 10,
+                         "path": "/我的分享/资料", "size": 0},
+                        {"server_filename": "readme.txt", "isdir": 0, "fs_id": 11,
+                         "path": "/我的分享/readme.txt", "size": 10},
+                    ]}
+                return {"errno": 0, "share_id": 1, "uk": 2, "list": [
+                    {"server_filename": "a.pdf", "isdir": 0, "fs_id": 12,
+                     "path": "/我的分享/资料/a.pdf", "size": 100},
+                    {"server_filename": "b.pdf", "isdir": 0, "fs_id": 13,
+                     "path": "/我的分享/资料/b.pdf", "size": 200},
+                ]}
+            if "gettemplatevariable" in url:
+                return {"errno": 0, "result": {"bdstoken": "tok"}}
+            if "/share/transfer" in url:
+                return {"errno": 0, "extra": {"list": []}}
+            if "/api/list" in url:
+                directory = unquote(url).split("dir=")[1].split("&")[0]
+                if directory.endswith("/资料"):
+                    return {"errno": 0, "list": [
+                        {"server_filename": "a.pdf", "isdir": 0, "fs_id": 22,
+                         "path": "/来自分享/我的分享/资料/a.pdf", "size": 100},
+                        {"server_filename": "b.pdf", "isdir": 0, "fs_id": 23,
+                         "path": "/来自分享/我的分享/资料/b.pdf", "size": 200},
+                    ]}
+                return {"errno": 0, "list": [
+                    {"server_filename": "资料", "isdir": 1, "fs_id": 20,
+                     "path": "/来自分享/我的分享/资料", "size": 0},
+                    {"server_filename": "readme.txt", "isdir": 0, "fs_id": 21,
+                     "path": "/来自分享/我的分享/readme.txt", "size": 10},
+                ]}
+            if "/rest/2.0/xpan/file" in url:
+                ids = unquote(url).split("fsids=[")[1].split("]")[0].split(",")
+                return {"errno": 0, "info": [
+                    {"errno": 0, "fs_id": int(item), "dlink": f"https://d.pcs.baidu.com/{item}"}
+                    for item in ids]}
+            raise AssertionError("意外的请求：" + url)
+
+        resolver = BaiduResolver({"BDUSS": "fake"})
+        with mock.patch.object(PanHTTP, "json", fake_json), \
+             mock.patch.object(BaiduResolver, "bootstrap", lambda self: None):
+            results = resolver.resolve_all("https://pan.baidu.com/s/1AbCdEf", "1234")
+
+        self.assertEqual(len(results), 3)
+        by_name = {item.file_name: item for item in results}
+        self.assertEqual(by_name["readme.txt"].relative_path, "我的分享/readme.txt")
+        self.assertEqual(by_name["a.pdf"].relative_path, "我的分享/资料/a.pdf")
+        self.assertEqual(by_name["b.pdf"].relative_path, "我的分享/资料/b.pdf")
+        self.assertEqual(by_name["readme.txt"].pan_fs_id, "21")
+        self.assertEqual(by_name["a.pdf"].pan_fs_id, "22")
+        self.assertEqual(by_name["a.pdf"].size, 100)
+
+        # 转存：顶层目录+文件一批传，fsidlist 不做二次编码，path 保留目录结构
+        transfer_calls = [(url, body.decode() if body else "")
+                          for url, method, body in seen if url and "/share/transfer" in url]
+        self.assertEqual(len(transfer_calls), 1)
+        self.assertIn("fsidlist=%5B10,11%5D", transfer_calls[0][1])
+        self.assertIn("path=/%E6%9D%A5%E8%87%AA%E5%88%86%E4%BA%AB/", transfer_calls[0][1])
+
+        # 批量 dlink：一次请求带全部 3 个 fs_id
+        dlink_urls = [url for url, _, _ in seen if "/rest/2.0/xpan/file" in url]
+        self.assertEqual(len(dlink_urls), 1)
+        self.assertIn("fsids=%5B21,22,23%5D", dlink_urls[0])
+        self.assertNotIn("%255B", dlink_urls[0])
+        print("\n  百度多文件：递归展开 3 文件、整树转存一批、相对路径对齐、批量 dlink")
+
+    def test_14c_multi_file_task_roundtrip(self):
+        """多文件任务：子目录落盘 + pan_fs_id 持久化往返。"""
+        engine = self.make_engine()
+        sub_dir = os.path.join(engine.settings["download_directory"], "我的分享", "sub")
+        task = engine.add_task("https://d.pcs.baidu.com/x", "a.pdf", 100,
+                               directory=sub_dir, pan_fs_id="22")
+        self.assertEqual(task.pan_fs_id, "22")
+        self.assertTrue(os.path.isdir(sub_dir))
+        restored = Task.from_dict(task.to_dict())
+        self.assertEqual(restored.pan_fs_id, "22")
+        self.assertEqual(restored.file_path, os.path.join(sub_dir, "a.pdf"))
+        print("\n  多文件任务：子目录创建与 pan_fs_id 持久化往返正确")
+
+    def test_14d_refresh_dlink_by_pan_fs_id(self):
+        """直链过期刷新：带 pan_fs_id 的任务按网盘文件重取，不再依赖分享重解析。"""
+
+        def fake_json(http_self, url, method="GET", headers=None, body=None):
+            if "gettemplatevariable" in url:
+                return {"errno": 0, "result": {"bdstoken": "tok"}}
+            if "/rest/2.0/xpan/file" in url:
+                self.assertIn("fsids=%5B999%5D", url)
+                return {"errno": 0, "info": [
+                    {"errno": 0, "fs_id": 999, "dlink": "https://d.pcs.baidu.com/new"}]}
+            raise AssertionError("意外的请求：" + url)
+
+        resolver = BaiduResolver({"BDUSS": "fake"})
+        with mock.patch.object(PanHTTP, "json", fake_json):
+            url = resolver.refresh_dlink("999")
+        self.assertEqual(url, "https://d.pcs.baidu.com/new")
+        headers = resolver.download_headers()
+        self.assertEqual(headers["User-Agent"], "pan.baidu.com")
+        print("\n  直链刷新：按 pan_fs_id 重取 dlink 与请求头正确")
+
     # ---------- Web 与 CLI ----------
 
     def test_15_web_api(self):
@@ -409,7 +521,7 @@ class EngineTestCase(unittest.TestCase):
                     return json.loads(response.read().decode())
 
             state = request("/api/state")
-            self.assertEqual(state["version"], "1.0.0")
+            self.assertEqual(state["version"], __version__)
             added = request("/api/tasks", {"link": self.server.url, "code": ""})
             self.assertTrue(added["ok"])
             self.assertEqual(added["added"], 1)
@@ -432,7 +544,7 @@ class EngineTestCase(unittest.TestCase):
         output = subprocess.run([sys.executable, str(ROOT / "yunx.py"), "--version"],
                                 capture_output=True, text=True, env=env, timeout=20)
         self.assertEqual(output.returncode, 0)
-        self.assertIn("1.0.0", output.stdout)
+        self.assertIn(__version__, output.stdout)
         output = subprocess.run([sys.executable, str(ROOT / "yunx.py"), "ls", "--json"],
                                 capture_output=True, text=True, env=env, timeout=20)
         self.assertEqual(output.returncode, 0)

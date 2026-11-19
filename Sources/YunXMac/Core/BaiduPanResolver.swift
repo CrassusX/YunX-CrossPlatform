@@ -77,7 +77,92 @@ struct BaiduPanResolver: PanResolver {
         )
     }
 
-    // MARK: 各步骤
+    // MARK: 多文件（递归目录树，保持结构下载全部文件）
+
+    /// 上限护栏：超大分享不至于把转存/列目录请求拖成无底洞
+    private static let maxFiles = 200
+    private static let maxDirectories = 60
+    /// 转存 / filemetas 单次请求的 fs_id 数量上限
+    private static let batchLimit = 100
+
+    func resolveAll(link: ParsedLink, credential: PanCredential) async throws -> [ResolvedFile] {
+        let http = PanHTTP(seed: credential.cookies)
+        try await bootstrap(http)
+
+        guard let url = link.url, let surl = PanLink.baiduSurl(from: url) else {
+            throw PanResolveError.linkInvalid("无法从链接里识别出百度网盘分享 ID")
+        }
+
+        let tree = try await listTree(http: http, link: link, surl: surl)
+
+        // 空分享 / 单文件分享：走已实测验证的单文件链路，行为与旧版一致
+        guard tree.files.count > 1 else {
+            return [try await resolve(link: link, credential: credential)]
+        }
+
+        let token = try await fetchBdToken(http: http)
+        let targetDir = "\(Self.transferRoot)/\(tree.shareName)"
+
+        // 1) 整树转存：只转顶层条目（目录+文件混合），百度会原样保留目录结构
+        try await transferBatch(http: http, link: link, entries: tree.topEntries,
+                                shareID: tree.shareID, uk: tree.uk,
+                                bdstoken: token, targetDir: targetDir)
+
+        // 2) 遍历自己网盘里的落地目录，拿到每个文件的 fs_id（相对路径对齐分享侧）
+        let diskFiles = try await listDiskTree(http: http, root: targetDir)
+        let byRelative = Dictionary(diskFiles.map { ($0.relativePath, $0) },
+                                    uniquingKeysWith: { a, _ in a })
+
+        // 3) 分享侧 ↔ 网盘侧按相对路径匹配
+        struct Pending {
+            var file: PanShareEntry
+            var fsID: String
+        }
+        var pending: [Pending] = []
+        for file in tree.files {
+            if let rel = file.relativePath, let disk = byRelative[rel], !disk.fsID.isEmpty {
+                pending.append(Pending(file: file, fsID: disk.fsID))
+            }
+        }
+        guard !pending.isEmpty else {
+            throw PanResolveError.platform("转存后未能对上文件清单，请稍后重试（分享 \(tree.files.count) 个文件，网盘侧 \(diskFiles.count) 个）")
+        }
+
+        // 4) 批量取 dlink
+        let dlinks = try await fetchDLinks(http: http,
+                                           fsIDs: pending.map { $0.fsID },
+                                           bdstoken: token)
+
+        let headers = downloadHeaders(http: http)
+        var results: [ResolvedFile] = []
+        for item in pending {
+            guard let dlink = dlinks[item.fsID] else { continue }
+            let name = (item.file.relativePath ?? item.file.name) as NSString
+            results.append(ResolvedFile(
+                url: dlink,
+                fileName: name.lastPathComponent,
+                size: item.file.size,
+                headers: headers,
+                provider: .baidu,
+                note: nil,
+                relativePath: item.file.relativePath
+            ))
+        }
+
+        guard !results.isEmpty else {
+            throw PanResolveError.platform("百度网盘没有返回任何可下载地址，可能是分享内容需要会员权限")
+        }
+
+        var note = "已转存整棵分享目录并加入 \(results.count) 个文件（保持目录结构），落地在网盘 \(targetDir)，可稍后自行清理"
+        if tree.truncated {
+            note = "分享过大，本次最多加入前 \(results.count) 个文件；" + note
+        } else if results.count < tree.files.count {
+            note = "分享共 \(tree.files.count) 个文件，成功加入 \(results.count) 个；" + note
+        }
+        results[0].note = note
+        return results
+    }
+
 
     /// 首页是为了拿到 BAIDUID，后续 verify 与 list 都依赖它
     private func bootstrap(_ http: PanHTTP) async throws {
@@ -94,20 +179,121 @@ struct BaiduPanResolver: PanResolver {
         var uk: String
     }
 
+    /// 递归展开后的分享树
+    private struct ShareTree {
+        /// 顶层条目（目录 + 文件混合，转存时整批传给百度）
+        var topEntries: [PanShareEntry]
+        /// 全部文件（非目录），每个都带 relativePath
+        var files: [PanShareEntry]
+        var shareID: String
+        var uk: String
+        /// 转存落地目录名（/来自分享/<shareName>/...）
+        var shareName: String
+        /// true = 分享过大，只展开了前 maxFiles 个文件
+        var truncated = false
+    }
+
     private func listFiles(http: PanHTTP, link: ParsedLink) async throws -> Listed {
         guard let url = link.url, let surl = PanLink.baiduSurl(from: url) else {
             throw PanResolveError.linkInvalid("无法从链接里识别出百度网盘分享 ID")
         }
 
-        // 有提取码就先换 BDCLND，无码分享直接列目录
         if let code = link.shareCode, !code.isEmpty {
             let verified = try await verifyPasscode(http: http, surl: surl, code: code)
             if !verified { throw PanResolveError.wrongPasscode }
         }
 
+        let payload = try await fetchShareList(http: http, surl: surl, dir: "/", root: true)
+        let parsed = try parseShareList(payload)
+
+        let list = parsed.entries
+        if list.isEmpty, let name = shareTitleFileName(payload) {
+            // 单文件分享时信息在外层
+            return Listed(
+                entries: [PanShareEntry(name: name, size: 0, isDirectory: false, id: "")],
+                shareID: parsed.shareID, uk: parsed.uk
+            )
+        }
+
+        if list.isEmpty { throw PanResolveError.emptyShare }
+        return Listed(entries: list, shareID: parsed.shareID, uk: parsed.uk)
+    }
+
+    /// BFS 递归展开整棵分享目录树
+    private func listTree(http: PanHTTP, link: ParsedLink, surl: String) async throws -> ShareTree {
+        if let code = link.shareCode, !code.isEmpty {
+            let verified = try await verifyPasscode(http: http, surl: surl, code: code)
+            if !verified { throw PanResolveError.wrongPasscode }
+        }
+
+        let rootPayload = try await fetchShareList(http: http, surl: surl, dir: "/", root: true)
+        let root = try parseShareList(rootPayload)
+        guard !root.entries.isEmpty else { throw PanResolveError.emptyShare }
+
+        // 分享名取顶层条目 sharePath 的第一段（/分享名/xxx），保证转存落地目录与分享对应
+        let rawShareName = root.entries.lazy
+            .compactMap { $0.sharePath }
+            .first
+            .map { ($0 as NSString).pathComponents.count > 1
+                   ? ($0 as NSString).pathComponents[1] : "" } ?? ""
+        let shareName = Prober.sanitize(rawShareName.isEmpty ? "分享_\(surl)" : rawShareName)
+
+        var topEntries: [PanShareEntry] = []
+        var files: [PanShareEntry] = []
+        var queue: [PanShareEntry] = []
+        var truncated = false
+
+        for entry in root.entries {
+            var item = entry
+            if item.sharePath == nil { item.sharePath = "/" + item.name }
+            if item.relativePath == nil { item.relativePath = item.name }
+            if item.isDirectory {
+                queue.append(item)
+            } else if files.count < Self.maxFiles {
+                files.append(item)
+            } else {
+                truncated = true
+            }
+            topEntries.append(item)
+        }
+
+        var expanded = 0
+        while let dir = queue.popLast() {
+            expanded += 1
+            if expanded > Self.maxDirectories {
+                truncated = true
+                break
+            }
+            guard let dirPath = dir.sharePath else { continue }
+            let subPayload = try await fetchShareList(http: http, surl: surl, dir: dirPath, root: false)
+            let sub = try parseShareList(subPayload)
+            let parentRelative = dir.relativePath ?? dir.name
+            for entry in sub.entries {
+                var item = entry
+                if item.sharePath == nil { item.sharePath = dirPath + "/" + item.name }
+                item.relativePath = parentRelative + "/" + item.name
+                if item.isDirectory {
+                    queue.append(item)
+                } else if files.count < Self.maxFiles {
+                    files.append(item)
+                } else {
+                    truncated = true
+                }
+            }
+        }
+
+        guard !files.isEmpty else { throw PanResolveError.emptyShare }
+        return ShareTree(topEntries: topEntries, files: files,
+                         shareID: root.shareID, uk: root.uk,
+                         shareName: shareName, truncated: truncated)
+    }
+
+    /// share/list 的原始请求（root=1 用于根目录，其余按 dir 走子目录）
+    private func fetchShareList(http: PanHTTP, surl: String, dir: String, root: Bool) async throws -> [String: Any] {
+        let encodedDir = dir.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? "/"
         var components = URLComponents(string: "https://pan.baidu.com/share/list")!
-        components.percentEncodedQuery = "shorturl=\(surl)&dir=%2F&root=1&page=1&num=100"
-            + "&order=time&desc=1&" + baseQuery()
+        components.percentEncodedQuery = "shorturl=\(surl)&dir=\(encodedDir)&root=\(root ? 1 : 0)"
+            + "&page=1&num=100&order=time&desc=1&" + baseQuery()
 
         var request = URLRequest(url: components.url!)
         request.setValue("https://pan.baidu.com/s/\(surl)", forHTTPHeaderField: "Referer")
@@ -129,33 +315,28 @@ struct BaiduPanResolver: PanResolver {
             let message = payload["show_msg"] as? String ?? "errno \(errno)"
             throw PanResolveError.platform("百度网盘返回错误：\(message)")
         }
+        return payload
+    }
 
+    private func parseShareList(_ payload: [String: Any]) throws -> (entries: [PanShareEntry], shareID: String, uk: String) {
         let shareID = (payload["share_id"] as? NSNumber)?.stringValue
             ?? (payload["share_id"] as? String) ?? ""
         let uk = (payload["uk"] as? NSNumber)?.stringValue
             ?? (payload["uk"] as? String) ?? ""
 
         let list = payload["list"] as? [[String: Any]] ?? []
-        if list.isEmpty, let name = shareTitleFileName(payload) {
-            // 单文件分享时信息在外层
-            return Listed(
-                entries: [PanShareEntry(name: name, size: 0, isDirectory: false, id: "")],
-                shareID: shareID, uk: uk
-            )
-        }
-
         let entries: [PanShareEntry] = list.compactMap { item in
-            guard let name = item["server_filename"] as? String else { return nil }
+            guard let name = item["server_filename"] as? String, !name.isEmpty else { return nil }
             let isDir = (item["isdir"] as? Int ?? 0) == 1
             let size = (item["size"] as? NSNumber)?.int64Value
                 ?? Int64(item["size"] as? String ?? "0") ?? 0
             let fsID = (item["fs_id"] as? NSNumber)?.stringValue
                 ?? String(describing: item["fs_id"] ?? "")
-            return PanShareEntry(name: name, size: size, isDirectory: isDir, id: fsID)
+            let path = item["path"] as? String
+            return PanShareEntry(name: name, size: size, isDirectory: isDir, id: fsID,
+                                 sharePath: path, relativePath: nil)
         }
-
-        if entries.isEmpty { throw PanResolveError.emptyShare }
-        return Listed(entries: entries, shareID: shareID, uk: uk)
+        return (entries, shareID, uk)
     }
 
     /// 单文件分享时 title 形如 "/路径/文件名.mp4"，取最后一段
@@ -384,6 +565,167 @@ struct BaiduPanResolver: PanResolver {
             return target
         }
         throw PanResolveError.platform("百度网盘没有返回下载地址，可能是该文件需要会员权限")
+    }
+
+    // MARK: 多文件辅助（整树转存 / 网盘树 / 批量 dlink）
+
+    /// 网盘直链公共请求头（Referer / UA / Cookie）
+    private func downloadHeaders(http: PanHTTP) -> [String: String] {
+        var headers = [
+            "Referer": "https://pan.baidu.com/disk/home",
+            // 百度 pcs 下载对 UA 敏感，用网盘自己的
+            "User-Agent": "pan.baidu.com",
+            "Cookie": http.allCookies()
+                .sorted { $0.key < $1.key }
+                .map { "\($0.key)=\($0.value)" }
+                .joined(separator: "; ")
+        ]
+        if headers["Cookie"]?.isEmpty ?? true { headers.removeValue(forKey: "Cookie") }
+        return headers
+    }
+
+    /// 分批转存顶层条目（目录 + 文件混合），百度会把目录树原样保留。
+    /// 与单文件转存不同：这里不逐个查重，errno 12（部分已存在）视为成功，
+    /// 幂等性由「转存后按网盘目录树对齐」这一步天然保证。
+    private func transferBatch(http: PanHTTP,
+                               link: ParsedLink,
+                               entries: [PanShareEntry],
+                               shareID: String,
+                               uk: String,
+                               bdstoken: String,
+                               targetDir: String) async throws {
+        guard !shareID.isEmpty, !uk.isEmpty else {
+            throw PanResolveError.platform("分享信息不完整，缺少 shareid 或 uk")
+        }
+
+        let ids = entries.compactMap { entry -> String? in
+            entry.id.isEmpty ? nil : entry.id
+        }
+        guard !ids.isEmpty else {
+            throw PanResolveError.platform("分享条目缺少文件标识，无法转存")
+        }
+
+        var components = URLComponents(string: "https://pan.baidu.com/share/transfer")!
+        components.percentEncodedQuery = "shareid=\(shareID)&from=\(uk)&ondup=newcopy"
+            + "&async=1&" + baseQuery() + "&bdstoken=\(bdstoken)"
+
+        let encodedPath = targetDir.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? targetDir
+
+        for start in stride(from: 0, to: ids.count, by: Self.batchLimit) {
+            let batch = ids[start..<min(start + Self.batchLimit, ids.count)]
+            let fsidlist = "%5B" + batch.joined(separator: ",") + "%5D"
+
+            var request = URLRequest(url: components.url!)
+            request.httpMethod = "POST"
+            request.setValue("application/x-www-form-urlencoded; charset=UTF-8",
+                             forHTTPHeaderField: "Content-Type")
+            request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            if let url = link.url, let surl = PanLink.baiduSurl(from: url) {
+                request.setValue("https://pan.baidu.com/s/\(surl)", forHTTPHeaderField: "Referer")
+            }
+            request.httpBody = "fsidlist=\(fsidlist)&path=\(encodedPath)".data(using: .utf8)
+
+            let payload = try await http.json(request)
+            let errno = payload["errno"] as? Int ?? -1
+            switch errno {
+            case 0, 12:
+                continue // 12 = 部分文件已存在，仍然算成功
+            case -6:
+                throw PanResolveError.credentialExpired(.baidu)
+            case 4:
+                throw PanResolveError.platform("该分享不允许转存")
+            case -33:
+                throw PanResolveError.platform("你的百度网盘空间不足")
+            default:
+                let message = payload["show_msg"] as? String ?? "errno \(errno)"
+                throw PanResolveError.platform("转存失败：\(message)")
+            }
+        }
+    }
+
+    private struct DiskFile {
+        var relativePath: String
+        var name: String
+        var size: Int64
+        var fsID: String
+    }
+
+    /// BFS 遍历用户网盘里的落地目录树，收集全部文件（相对 root 的路径）
+    private func listDiskTree(http: PanHTTP, root: String) async throws -> [DiskFile] {
+        var files: [DiskFile] = []
+        var queue: [(absolute: String, relative: String)] = [(root, "")]
+        var visited = 0
+
+        while let current = queue.popLast() {
+            visited += 1
+            if visited > Self.maxDirectories + 5 { break }
+
+            let encoded = current.absolute.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? current.absolute
+            var components = URLComponents(string: "https://pan.baidu.com/api/list")!
+            components.percentEncodedQuery = "dir=\(encoded)&order=time&desc=1&showempty=0"
+                + "&page=1&num=200&" + baseQuery()
+
+            var request = URLRequest(url: components.url!)
+            request.setValue("https://pan.baidu.com/disk/home", forHTTPHeaderField: "Referer")
+
+            guard let payload = try? await http.json(request),
+                  let list = payload["list"] as? [[String: Any]] else { continue }
+
+            for item in list {
+                guard let name = item["server_filename"] as? String, !name.isEmpty else { continue }
+                let isDir = (item["isdir"] as? Int ?? 0) == 1
+                let fsID = (item["fs_id"] as? NSNumber)?.stringValue
+                    ?? (item["fs_id"] as? String) ?? ""
+                let relative = current.relative.isEmpty ? name : current.relative + "/" + name
+
+                if isDir {
+                    let childPath = (item["path"] as? String) ?? (current.absolute + "/" + name)
+                    queue.append((childPath, relative))
+                } else {
+                    let size = (item["size"] as? NSNumber)?.int64Value
+                        ?? Int64(item["size"] as? String ?? "0") ?? 0
+                    files.append(DiskFile(relativePath: relative, name: name,
+                                          size: size, fsID: fsID))
+                }
+            }
+        }
+        return files
+    }
+
+    /// 批量取 dlink（filemetas 的 fsids 数组），返回 fsID -> dlink
+    private func fetchDLinks(http: PanHTTP, fsIDs: [String], bdstoken: String) async throws -> [String: URL] {
+        var result: [String: URL] = [:]
+
+        for start in stride(from: 0, to: fsIDs.count, by: Self.batchLimit) {
+            let batch = fsIDs[start..<min(start + Self.batchLimit, fsIDs.count)]
+            let fsidsParam = "%5B" + batch.joined(separator: ",") + "%5D"
+            let urlString = "https://pan.baidu.com/rest/2.0/xpan/file"
+                + "?method=filemetas&dlink=1&fsids=\(fsidsParam)"
+                + "&web=1&app_id=\(Self.appID)&channel=chunlei&clienttype=0&bdstoken=\(bdstoken)"
+
+            guard let url = URL(string: urlString) else { continue }
+            var request = URLRequest(url: url)
+            request.setValue("https://pan.baidu.com/disk/home", forHTTPHeaderField: "Referer")
+
+            let payload = try await http.json(request)
+            let errno = payload["errno"] as? Int ?? -1
+            if errno == -6 { throw PanResolveError.credentialExpired(.baidu) }
+            guard errno == 0,
+                  let info = payload["info"] as? [[String: Any]] else {
+                let message = payload["show_msg"] as? String ?? "errno \(errno)"
+                throw PanResolveError.platform("取直链失败：\(message)")
+            }
+
+            for item in info {
+                guard let fsID = (item["fs_id"] as? NSNumber)?.stringValue
+                        ?? (item["fs_id"] as? String),
+                      let dlink = item["dlink"] as? String,
+                      let target = URL(string: dlink) else { continue }
+                if let inner = item["errno"] as? Int, inner != 0 { continue }
+                result[fsID] = target
+            }
+        }
+        return result
     }
 
     // MARK: 清理

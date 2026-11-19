@@ -76,6 +76,8 @@ class Task:
     share_code: Optional[str] = None
     provider: str = "direct"
     note: Optional[str] = None
+    # 百度多文件任务：转存到自己网盘后的 fs_id，直链过期刷新时按它重取
+    pan_fs_id: Optional[str] = None
 
     # 运行时字段，不序列化
     speed: float = 0.0

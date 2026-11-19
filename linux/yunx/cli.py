@@ -106,15 +106,26 @@ def add_links(text: str, code: str = None, directory: str = None,
         if link.provider == "baidu":
             if not cookiestore.has_login(cookies):
                 raise PanError("尚未登录百度，请先执行 yunx login")
-            resolved = BaiduResolver(cookies).resolve(link.raw, code or link.share_code)
-            task = engine.add_task(
-                url=resolved.url, file_name=resolved.file_name,
-                total_size=resolved.size, directory=directory,
-                headers=resolved.headers, source_url=resolved.source_url,
-                share_code=resolved.share_code, provider="baidu",
-                note=resolved.note,
-            )
-            added.append((task, resolved.note))
+            resolved_list = BaiduResolver(cookies).resolve_all(
+                link.raw, code or link.share_code)
+            for index, resolved in enumerate(resolved_list):
+                # 多文件分享保持目录结构：相对路径落到下载目录（或用户指定目录）的子目录里
+                task_directory = directory
+                if resolved.relative_path:
+                    parent = os.path.dirname(resolved.relative_path)
+                    if parent:
+                        base = directory or str(engine.settings.get("download_directory"))
+                        task_directory = os.path.join(base, parent)
+                # 总结性说明只挂在第一个任务上，避免每行都重复
+                note = resolved.note if index == 0 else None
+                task = engine.add_task(
+                    url=resolved.url, file_name=resolved.file_name,
+                    total_size=resolved.size, directory=task_directory,
+                    headers=resolved.headers, source_url=resolved.source_url,
+                    share_code=resolved.share_code, provider="baidu",
+                    note=note, pan_fs_id=resolved.pan_fs_id,
+                )
+                added.append((task, note))
         elif link.provider == "direct":
             direct_name, size, support_range = probe_direct(link.raw)
             task = engine.add_task(
