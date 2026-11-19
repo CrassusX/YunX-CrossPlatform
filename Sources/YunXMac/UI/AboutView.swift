@@ -85,7 +85,7 @@ struct AboutView: View {
                                     NSWorkspace.shared.open(URL(string: "https://github.com/tidain/YunX-Desktop")!)
                                 }
                                 Button("源代码") {
-                                    NSWorkspace.shared.open(URL(string: "https://github.com/CrassusX/YunX-Mac-Desktop")!)
+                                    NSWorkspace.shared.open(URL(string: "https://github.com/CrassusX/YunX-CrossPlatform")!)
                                 }
                             }
                             .buttonStyle(.bordered)

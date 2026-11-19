@@ -1,10 +1,10 @@
-# 云析 · macOS 版
+# 云析 · 跨平台版（macOS / Linux）
 
-> 粘贴链接，直接高速下载 —— 参考 [YunX-Desktop](https://github.com/tidain/YunX-Desktop) 的设计，用 Swift + SwiftUI 原生重写的 macOS 客户端。
+> 粘贴链接，直接高速下载 —— 参考 [YunX-Desktop](https://github.com/tidain/YunX-Desktop) 的设计，提供 macOS 与 Linux 双平台客户端。
 
-通用二进制，**Apple 芯片（arm64）与 Intel 芯片（x86_64）同包原生运行**，单个 DMG 1.3 MB。
+**macOS 版**：Swift + SwiftUI 原生重写，通用二进制，**Apple 芯片（arm64）与 Intel 芯片（x86_64）同包原生运行**，单个 DMG 1.3 MB。
 
-同一仓库还包含 [Linux 版](linux/README.md)：纯 Python 标准库实现，带命令行与本地网页面板，支持百度分享与直链，16 项自动化测试全部通过。
+**Linux 版**：见 [linux/README.md](linux/README.md)，纯 Python 标准库实现，带命令行与本地网页面板，支持百度分享与直链，16 项自动化测试全部通过。
 
 ![主界面](docs/screenshot-main.png)
 
@@ -80,7 +80,7 @@
 
 ## 安装
 
-从 [Releases](https://github.com/CrassusX/YunX-Mac-Desktop/releases) 下载 `YunX-Mac-Desktop-<版本>.dmg`，打开后把 app 拖进「应用程序」。
+从 [Releases](https://github.com/CrassusX/YunX-CrossPlatform/releases) 下载 `YunX-Mac-Desktop-<版本>.dmg`，打开后把 app 拖进「应用程序」。
 
 应用使用 **ad-hoc 签名**（没有 Apple 开发者证书），首次打开会被 Gatekeeper 拦下，两种解法：
 
@@ -96,8 +96,8 @@ xattr -dr com.apple.quarantine /Applications/YunX-Mac-Desktop.app
 要求：macOS 13+、Xcode（或 Command Line Tools，但**通用二进制必须装完整 Xcode**，因为 SPM 的多架构构建依赖 xcbuild）。
 
 ```bash
-git clone https://github.com/CrassusX/YunX-Mac-Desktop.git
-cd YunX-Mac-Desktop
+git clone https://github.com/CrassusX/YunX-CrossPlatform.git
+cd YunX-CrossPlatform
 
 # 一键产出 .app 与 .dmg（自动编译 arm64 + x86_64 并 lipo 合并）
 ./scripts/build-app.sh
